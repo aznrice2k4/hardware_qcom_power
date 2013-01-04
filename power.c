@@ -162,9 +162,10 @@ static void touch_boost()
     }
 
     rc = sendto(client_sockfd, "1", 1, 0, (const struct sockaddr *)&client_addr, sizeof(struct sockaddr_un));
-    if (rc < 0) {
-        ALOGE("%s: failed to send: %s", __func__, strerror(errno));
-    }
+    /* get rid of logcat spam when mpdecision is off */
+    //if (rc < 0) {
+        //ALOGE("%s: failed to send: %s", __func__, strerror(errno));
+    //}
 }
 
 static void krait_power_set_interactive(struct power_module *module, int on)
