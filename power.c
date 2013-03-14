@@ -37,7 +37,7 @@
 #define SAMPLING_RATE_SCREEN_ON "50000"
 #define SAMPLING_RATE_SCREEN_OFF "500000"
 
-#define MAX_BUF_SZ  10
+#define MAX_BUF_SZ  80
 
 /* initialize to something safe */
 static char scaling_max_freq[MAX_BUF_SZ] = "1512000";
@@ -47,14 +47,11 @@ static struct sockaddr_un client_addr;
 
 struct krait_power_module {
     struct power_module base;
-    pthread_mutex_t lock;
-    int boostpulse_fd;
-    int boostpulse_warned;
 };
 
 static void sysfs_write(char *path, char *s)
 {
-    char buf[80];
+    char buf[MAX_BUF_SZ];
     int len;
     int fd = open(path, O_WRONLY);
 
@@ -69,7 +66,6 @@ static void sysfs_write(char *path, char *s)
         strerror_r(errno, buf, sizeof(buf));
         ALOGE("Error writing to %s: %s\n", path, buf);
     }
-
     close(fd);
 }
 
@@ -110,7 +106,16 @@ static int get_scaling_governor(char governor[], int size)
 
 static void krait_power_init(struct power_module *module)
 {
-    sysfs_write(SAMPLING_RATE_INTELLIDEMAND, SAMPLING_RATE_SCREEN_ON);
+    char governor[MAX_BUF_SZ];
+
+    if (get_scaling_governor(governor, sizeof(governor)) < 0) {
+        ALOGE("Can't read scaling governor.");
+    } else {
+        if (strncmp(governor, "intellidemand", 13) == 0) {
+            sysfs_write(SAMPLING_RATE_INTELLIDEMAND,
+                SAMPLING_RATE_SCREEN_ON);
+        }
+    }
 
     ALOGI("%s", __func__);
     client_sockfd = socket(PF_UNIX, SOCK_DGRAM, 0);
@@ -123,35 +128,6 @@ static void krait_power_init(struct power_module *module)
     snprintf(client_addr.sun_path, UNIX_PATH_MAX, TOUCHBOOST_SOCKET);
 }
 
-static int boostpulse_open(struct krait_power_module *krait)
-{
-    char buf[80];
-    char governor[80];
-
-    pthread_mutex_lock(&krait->lock);
-
-    if (krait->boostpulse_fd < 0) {
-        if (get_scaling_governor(governor, sizeof(governor)) < 0) {
-            ALOGE("Can't read scaling governor.");
-            krait->boostpulse_warned = 1;
-        } else {
-            if (strncmp(governor, "interactive", 11) == 0)
-                krait->boostpulse_fd = open(BOOSTPULSE_INTERACTIVE, O_WRONLY);
-            else if (strncmp(governor, "intellidemand", 13) == 0)
-                krait->boostpulse_fd = open(BOOSTPULSE_INTELLIDEMAND, O_WRONLY);
-
-            if (krait->boostpulse_fd < 0 && !krait->boostpulse_warned) {
-                strerror_r(errno, buf, sizeof(buf));
-                ALOGE("Error opening boostpulse: %s\n", buf);
-                krait->boostpulse_warned = 1;
-            }
-        }
-    }
-
-    pthread_mutex_unlock(&krait->lock);
-    return krait->boostpulse_fd;
-}
-
 static void touch_boost()
 {
     int rc;
@@ -161,7 +137,8 @@ static void touch_boost()
         return;
     }
 
-    rc = sendto(client_sockfd, "1", 1, 0, (const struct sockaddr *)&client_addr, sizeof(struct sockaddr_un));
+    rc = sendto(client_sockfd, "1", 1, 0,
+	(const struct sockaddr *)&client_addr, sizeof(struct sockaddr_un));
     /* get rid of logcat spam when mpdecision is off */
     //if (rc < 0) {
         //ALOGE("%s: failed to send: %s", __func__, strerror(errno));
@@ -170,44 +147,44 @@ static void touch_boost()
 
 static void krait_power_set_interactive(struct power_module *module, int on)
 {
+    char governor[MAX_BUF_SZ];
+
     ALOGV("%s %s", __func__, (on ? "ON" : "OFF"));
     if (on)
         touch_boost();
 
-    sysfs_write(SAMPLING_RATE_INTELLIDEMAND,
-            on ? SAMPLING_RATE_SCREEN_ON : SAMPLING_RATE_SCREEN_OFF);
-
+    if (get_scaling_governor(governor, sizeof(governor)) < 0) {
+        ALOGE("Can't read scaling governor.");
+    } else {
+        if (strncmp(governor, "intellidemand", 13) == 0) {
+            sysfs_write(SAMPLING_RATE_INTELLIDEMAND,
+                on ? SAMPLING_RATE_SCREEN_ON : SAMPLING_RATE_SCREEN_OFF);
+        }
+    }
 }
 
 static void krait_power_hint(struct power_module *module, power_hint_t hint,
                        void *data) {
     struct krait_power_module *krait = (struct krait_power_module *) module;
-    char buf[80];
-    int len;
-    int duration = 1;
+    char governor[MAX_BUF_SZ];
 
     switch (hint) {
         case POWER_HINT_INTERACTION:
-            if (boostpulse_open(krait) >= 0) {
-                if (data != NULL)
-                    duration = (int)data;
+            ALOGV("POWER_HINT_INTERACTION");
+            // interactivei & intellidemand governors
 
-                snprintf(buf, sizeof(buf), "%d", duration);
-                len = write(krait->boostpulse_fd, buf, strlen(buf));
-
-                if (len < 0) {
-                    strerror_r(errno, buf, sizeof(buf));
-                    ALOGE("Error writing to boostpulse: %s\n", buf);
-
-                    pthread_mutex_lock(&krait->lock);
-                    close(krait->boostpulse_fd);
-                    krait->boostpulse_fd = -1;
-                    krait->boostpulse_warned = 0;
-                    pthread_mutex_unlock(&krait->lock);
+            if (get_scaling_governor(governor, sizeof(governor)) < 0) {
+                ALOGE("Can't read scaling governor.");
+            } else {
+                if (strncmp(governor, "interactive", 11) == 0) {
+                    sysfs_write(BOOSTPULSE_INTERACTIVE, "1");
+                    //ALOGI("interactive boost!");
+                } else if (strncmp(governor, "intellidemand", 13) == 0) {
+                    sysfs_write(BOOSTPULSE_INTELLIDEMAND, "1");
+                    //ALOGI("intellidemand boost!");
                 }
             }
-
-            ALOGV("POWER_HINT_INTERACTION");
+            // mpdecision
             touch_boost();
             break;
 #if 0
@@ -240,7 +217,4 @@ struct krait_power_module HAL_MODULE_INFO_SYM = {
         setInteractive: krait_power_set_interactive,
         powerHint: krait_power_hint,
     },
-    lock: PTHREAD_MUTEX_INITIALIZER,
-    boostpulse_fd: -1,
-    boostpulse_warned: 0,
 };
